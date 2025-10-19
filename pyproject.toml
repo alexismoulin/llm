@@ -1,0 +1,13 @@
+[project]
+name = "llm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "jupyterlab>=4.4.9",
+    "numpy>=2.3.4",
+    "tokenizers>=0.22.1",
+    "torch>=2.9.0",
+    "torchinfo>=1.8.0",
+]
