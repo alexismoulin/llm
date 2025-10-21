@@ -1,6 +1,25 @@
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional, Any
+from typing import List, Tuple, Optional, TypedDict
+
+# -------- Types --------
+
+KVPair = Tuple[torch.Tensor, torch.Tensor]
+
+class QwenConfig(TypedDict):
+    vocab_size: int
+    context_length: int
+    emb_dim: int
+    n_heads: int
+    n_layers: int
+    hidden_dim: int
+    head_dim: Optional[int]
+    qk_norm: bool
+    n_kv_groups: int
+    rope_base: float
+    dtype: torch.dtype
+
+# -------- Config --------
 
 QWEN_CONFIG_06_B = {
     "vocab_size": 151_936,     # Vocabulary size
@@ -16,8 +35,14 @@ QWEN_CONFIG_06_B = {
     "dtype": torch.bfloat16,   # Lower-precision dtype to reduce memory usage
 }
 
+# -------- Modules --------
 
 class RMSNorm(nn.Module):
+    eps: float
+    qwen3_compatible: bool
+    scale: nn.Parameter
+    shift: Optional[nn.Parameter]
+
     def __init__(self, emb_dim: int, eps: float=1e-6, bias: bool=False, qwen3_compatible: bool=True):
         super().__init__()
         self.eps = eps
@@ -42,7 +67,11 @@ class RMSNorm(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, cfg: Dict[str, Any]):
+    fc1: nn.Linear
+    fc2: nn.Linear
+    fc3: nn.Linear
+
+    def __init__(self, cfg: QwenConfig):
         super().__init__()
         self.fc1 = nn.Linear(
             cfg["emb_dim"], cfg["hidden_dim"], dtype=cfg["dtype"], bias=False
@@ -60,8 +89,9 @@ class FeedForward(nn.Module):
         x = nn.functional.silu(x_fc1) * x_fc2
         return self.fc3(x)
 
+# -------- RoPE utilities --------
 
-def compute_rope_params(head_dim: int, theta_base: int=10_000, context_length: int=4096,
+def compute_rope_params(head_dim: int, theta_base: float=10_000.0, context_length: int=4096,
                         dtype: torch.dtype=torch.float32) -> Tuple[torch.Tensor, torch.Tensor]:
     assert head_dim % 2 == 0, "Embedding dimension must be even"
     inv_freq = 1.0 / (theta_base ** (
@@ -98,6 +128,20 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, offset: in
 
 
 class GroupedQueryAttention(nn.Module):
+    num_heads: int
+    num_kv_groups: int
+    group_size: int
+    head_dim: int
+    d_out: int
+
+    W_query: nn.Linear
+    W_key: nn.Linear
+    W_value: nn.Linear
+    out_proj: nn.Linear
+
+    q_norm: Optional[RMSNorm]
+    k_norm: Optional[RMSNorm]
+
     def __init__(self, d_in: int, num_heads: int, num_kv_groups: int, head_dim: Optional[int] = None,
                  qk_norm: bool = False, dtype: Optional[torch.dtype] = None):
         super().__init__()
@@ -133,8 +177,7 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = self.k_norm = None
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, start_pos: int = 0,
-                cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[
-        torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+                cache: Optional[KVPair] = None) -> Tuple[torch.Tensor, KVPair]:
 
         b, num_tokens, _ = x.shape
 
@@ -177,7 +220,12 @@ class GroupedQueryAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: Dict[str, Any]):
+    att: GroupedQueryAttention
+    ff: FeedForward
+    norm1: RMSNorm
+    norm2: RMSNorm
+
+    def __init__(self, cfg: QwenConfig):
         super().__init__()
         self.att = GroupedQueryAttention(
             d_in=cfg["emb_dim"],
@@ -192,7 +240,7 @@ class TransformerBlock(nn.Module):
         self.norm2 = RMSNorm(cfg["emb_dim"], eps=1e-6)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, start_pos: int=0,
-                cache: Optional[Tuple[torch.Tensor, torch.Tensor]]=None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+                cache: Optional[KVPair]=None) -> Tuple[torch.Tensor, KVPair]:
         # Shortcut connection for attention block
         shortcut = x
         x = self.norm1(x)
@@ -206,10 +254,41 @@ class TransformerBlock(nn.Module):
         x = x + shortcut  # Add the original input back
 
         return x, next_cache
+    
+
+class KVCache:
+    cache: List[Optional[KVPair]]
+
+    def __init__(self, n_layers: int) -> None:
+        self.cache = [None] * n_layers
+
+    def get(self, layer_idx: int) -> Optional[KVPair]:
+        return self.cache[layer_idx]
+
+    def update(self, layer_idx: int, value: Optional[KVPair]) -> None:
+        self.cache[layer_idx] = value
+
+    def get_all(self) -> List[Optional[KVPair]]:
+        return self.cache
+
+    def reset(self) -> None:
+        for i in range(len(self.cache)):
+            self.cache[i] = None
 
 
 class Qwen3Model(nn.Module):
-    def __init__(self, cfg: Dict[str, Any]):
+    tok_emb: nn.Embedding
+    trf_blocks: nn.ModuleList
+    final_norm: RMSNorm
+    out_head: nn.Linear
+
+    cos: torch.Tensor
+    sin: torch.Tensor
+
+    cfg: QwenConfig
+    current_pos: int
+
+    def __init__(self, cfg: QwenConfig):
         super().__init__()
 
         # Main model parameters
@@ -233,7 +312,7 @@ class Qwen3Model(nn.Module):
         self.cfg = cfg
         self.current_pos = 0  # Track current position in KV cache
 
-    def forward(self, in_idx: torch.Tensor, cache=None) -> torch.Tensor:
+    def forward(self, in_idx: torch.Tensor, cache: Optional[KVCache]=None) -> torch.Tensor:
         # Forward pass
         tok_embeds: torch.Tensor = self.tok_emb(in_idx)
         x = tok_embeds
@@ -244,14 +323,13 @@ class Qwen3Model(nn.Module):
             pos_end = pos_start + num_tokens
             self.current_pos = pos_end
             mask = torch.triu(
-                torch.ones(pos_end, pos_end, device=x.device, dtype=torch.bool),
+                input=torch.ones(pos_end, pos_end, device=x.device, dtype=torch.bool),
                 diagonal=1
             )[pos_start:pos_end, :pos_end]
         else:
             pos_start = 0  # Not strictly necessary but helps torch.compile
             mask = torch.triu(
-                torch.ones(num_tokens, num_tokens, device=x.device,
-                           dtype=torch.bool),
+                input=torch.ones(num_tokens, num_tokens, device=x.device, dtype=torch.bool),
                 diagonal=1
             )
         # Shape (1, 1, num_tokens, num_tokens) to broadcast across batch and heads
@@ -259,11 +337,9 @@ class Qwen3Model(nn.Module):
 
         for i, block in enumerate(self.trf_blocks):
             blk_cache = cache.get(i) if cache else None
-            x, new_blk_cache = block(x, mask, self.cos, self.sin,
-                                     start_pos=pos_start,
-                                     cache=blk_cache)
+            x, new_blk_cache = block(x, mask, self.cos, self.sin, start_pos=pos_start, cache=blk_cache)
             if cache is not None:
-                cache.update(i, new_blk_cache)
+                cache.update(layer_idx=i, value=new_blk_cache)
 
         x = self.final_norm(x)
         logits: torch.Tensor = self.out_head(x.to(self.cfg["dtype"]))

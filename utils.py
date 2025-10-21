@@ -4,11 +4,11 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Literal
 from tokenizers import Tokenizer
 
 
-def download_file(url, out_dir: str=".", backup_url=None) -> Path:
+def download_file(url: str, out_dir: str=".", backup_url: Optional[str]=None) -> Path:
     """Download *url* into *out_dir* with an optional mirror fallback."""
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -53,7 +53,7 @@ def download_file(url, out_dir: str=".", backup_url=None) -> Path:
     raise RuntimeError(f"Failed to download {filename} from both mirrors.")
 
 
-def download_qwen3_small(kind: str="base", tokenizer_only: bool=False, out_dir: str=".") -> None:
+def download_qwen3_small(kind: Literal["base", "reasoning"]="base", tokenizer_only: bool=False, out_dir: str=".") -> None:
     files = {
         "base": {"model": "qwen3-0.6B-base.pth", "tokenizer": "tokenizer-base.json"},
         "reasoning": {"model": "qwen3-0.6B-reasoning.pth", "tokenizer": "tokenizer-reasoning.json"},
@@ -74,6 +74,7 @@ def download_qwen3_small(kind: str="base", tokenizer_only: bool=False, out_dir: 
 
 
 class Qwen3Tokenizer:
+
     _SPECIALS: List[str] = [
         "<|endoftext|>",
         "<|im_start|>", "<|im_end|>",
@@ -84,6 +85,18 @@ class Qwen3Tokenizer:
         "<|vision_pad|>", "<|image_pad|>", "<|video_pad|>",
     ]
     _SPLIT_RE = re.compile(pattern=r"(<\|[^>]+?\|>)")
+
+    apply_chat_template: bool
+    add_generation_prompt: bool
+    add_thinking: bool
+
+    _tok: Tokenizer
+    _special_to_id: Dict[str, Optional[int]]
+
+    pad_token: str
+    pad_token_id: Optional[int]
+    eos_token: str
+    eos_token_id: Optional[int]
 
     def __init__(self, tokenizer_file_path: str | Path ="tokenizer.json",
                  apply_chat_template: bool=False,
@@ -112,7 +125,7 @@ class Qwen3Tokenizer:
             self.eos_token = "<|im_end|>"
         self.eos_token_id = self._special_to_id.get(self.eos_token)
 
-    def encode(self, prompt: str, chat_wrapped=None) -> List[Optional[int]]:
+    def encode(self, prompt: str, chat_wrapped: Optional[bool]=None) -> List[Optional[int]]:
         if chat_wrapped is None:
             chat_wrapped = self.apply_chat_template
 
@@ -131,7 +144,7 @@ class Qwen3Tokenizer:
                 ids.extend(self._tok.encode(part).ids)
         return ids
 
-    def decode(self, token_ids) -> str:
+    def decode(self, token_ids: List[int]) -> str:
         return self._tok.decode(ids=token_ids, skip_special_tokens=False)
 
     def _wrap_chat(self, user_msg: str) -> str:
