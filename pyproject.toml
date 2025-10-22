@@ -11,3 +11,8 @@ dependencies = [
     "torch>=2.9.0",
     "torchinfo>=1.8.0",
 ]
+
+[tool.uv.workspace]
+members = [
+    "legacy",
+]
