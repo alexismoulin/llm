@@ -21,7 +21,7 @@ class QwenConfig(TypedDict):
 
 # -------- Config --------
 
-QWEN_CONFIG_06_B = {
+QWEN_CONFIG_06_B: QwenConfig = {
     "vocab_size": 151_936,     # Vocabulary size
     "context_length": 40_960,  # Context length that was used to train the model
     "emb_dim": 1024,           # Embedding dimension

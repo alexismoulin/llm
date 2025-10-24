@@ -125,21 +125,24 @@ class Qwen3Tokenizer:
             self.eos_token = "<|im_end|>"
         self.eos_token_id = self._special_to_id.get(self.eos_token)
 
-    def encode(self, prompt: str, chat_wrapped: Optional[bool]=None) -> List[Optional[int]]:
+    def encode(self, prompt: str, chat_wrapped: bool | None = None) -> list[int]:
         if chat_wrapped is None:
             chat_wrapped = self.apply_chat_template
 
         stripped = prompt.strip()
-        if stripped in self._special_to_id and "\n" not in stripped:
-            return [self._special_to_id[stripped]]
+        if "\n" not in stripped:
+            tid0 = self._special_to_id.get(stripped)
+            if tid0 is not None:
+                return [tid0]
 
         if chat_wrapped:
             prompt = self._wrap_chat(prompt)
 
-        ids: List[Optional[int]] = []
+        ids: list[int] = []
         for part in filter(None, self._SPLIT_RE.split(prompt)):
-            if part in self._special_to_id:
-                ids.append(self._special_to_id[part])
+            tid = self._special_to_id.get(part)
+            if tid is not None:
+                ids.append(tid)
             else:
                 ids.extend(self._tok.encode(part).ids)
         return ids
