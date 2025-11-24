@@ -4,3 +4,4 @@ sympy
 tokenizers
 torch
 torchinfo
+matplotlib
