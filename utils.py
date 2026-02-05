@@ -5,7 +5,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Literal, Generator
+from typing import List, Dict, Tuple, Optional, Literal, Generator, Callable
 from tokenizers import Tokenizer
 from qwen3 import Qwen3Model, KVCache, QWEN_CONFIG_06_B
 
@@ -163,36 +163,6 @@ class Qwen3Tokenizer:
         return s
 
 
-def render_prompt(prompt: str) -> str:
-    template = (
-        "You are a helpful math assistant.\n"
-        "Solve the problem and write the final "
-        "result on a new line as:\n"
-        "\\boxed{ANSWER}\n\n"
-        f"Problem:\n{prompt}\n\nAnswer:"
-    )
-    return template
-
-
-@torch.inference_mode()
-def generate_text_basic_stream_cache(model: Qwen3Model, token_ids: torch.Tensor, max_new_tokens: int,
-                                     eos_token_id: Optional[int] = None) -> Generator[torch.Tensor, None, None]:
-    model.eval()
-    cache = KVCache(n_layers=model.cfg["n_layers"])
-    model.reset_kv_cache()
-
-    out: torch.Tensor = model(in_idx=token_ids, cache=cache)[:, -1]
-    for _ in range(max_new_tokens):
-        next_token = torch.argmax(out, dim=-1, keepdim=True)
-
-        if (eos_token_id is not None
-                and torch.all(next_token == eos_token_id)):
-            break
-
-        yield next_token
-        out = model(in_idx=next_token, cache=cache)[:, -1]
-
-
 def load_model_and_tokenizer(which_model: Literal["base", "reasoning"], device: torch.device,
                              use_compile: bool, local_dir: str="qwen3") -> Tuple[Qwen3Model, Qwen3Tokenizer]:
     if which_model == "base":
@@ -229,3 +199,4 @@ def load_model_and_tokenizer(which_model: Literal["base", "reasoning"], device: 
         model = torch.compile(model)
 
     return model, tokenizer
+
